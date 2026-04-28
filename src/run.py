@@ -1,4 +1,3 @@
-import pandas as pd
 from src.read_raw import read_log
 
 lines = read_log('data/auth.log')
