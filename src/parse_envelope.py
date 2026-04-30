@@ -1,16 +1,21 @@
+from datetime import datetime
 import re
 
 def parse_line(line: str) -> dict:
   line = line.strip() # removes \n
 
-  # Splits log
-  parts = line.split(" ", 4)
+  parts = line.split()
 
-  timestamp = "2024 " + " ".join(parts[0:3]) #Adds a year for the db insertion
+  timestamp_str = f"2026 {parts[0]} {parts[1]} {parts[2]}" #Adds year for db insertion
+  timestamp = datetime.strptime(timestamp_str, "%Y %b %d %H:%M:%S")
+
   host = parts[3]
 
+  # reconstruct remainder
+  rest = " ".join(parts[4:])
+
   # Separates process and message
-  process_part, message = parts[4].split(":", 1)
+  process_part, message = rest.split(":", 1)
   process = process_part.split("[")[0] # Removes PID if present
   raw_message = message.strip()
 
@@ -39,28 +44,41 @@ def parse_event(envelope):
       "raw_message": msg
   }
 
+  # SUCCESS
   if "accepted publickey" in msg_lower:
       result["event_type"] = "AUTH"
       result["auth_outcome"] = "SUCCESS"
       result["user_validity"] = "VALID"
 
-      result["user_name"] = extract_user_accepted(msg)
+      result["user_name"] = extract_user_for(msg)
       result["ip"] = extract_ip(msg)
 
+  # MAX ATTEMPTS
   elif "maximum authentication attempts exceeded" in msg_lower:
+    result["event_type"] = "AUTH"
+    result["auth_outcome"] = "FAILURE"
+    result["failure_mode"] = "MAX_ATTEMPTS"
+
+    if "invalid user" in msg_lower:
+        result["user_validity"] = "INVALID"
+        result["user_name"] = extract_user_invalid(msg)
+    else:
+        result["user_validity"] = "VALID"
+        result["user_name"] = extract_user_for(msg)
+
+    result["ip"] = extract_ip(msg)
+
+  # PREAUTH INVALID USER (no IP expected)
+  elif "input_userauth_request" in msg_lower and "invalid user" in msg_lower:
       result["event_type"] = "AUTH"
       result["auth_outcome"] = "FAILURE"
-      result["failure_mode"] = "MAX_ATTEMPTS"
+      result["user_validity"] = "INVALID"
+      result["failure_mode"] = "PREAUTH_INVALID_USER"
 
-      if "invalid user" in msg_lower:
-          result["user_validity"] = "INVALID"
-          result["user_name"] = extract_user_invalid(msg)
-      else:
-          result["user_validity"] = "VALID"
-          result["user_name"] = extract_user_for(msg)
+      result["user_name"] = extract_user_invalid(msg)
+      result["ip"] = None
 
-      result["ip"] = extract_ip(msg)
-
+  # GENERIC INVALID USER
   elif "invalid user" in msg_lower:
       result["event_type"] = "AUTH"
       result["auth_outcome"] = "FAILURE"
@@ -71,23 +89,19 @@ def parse_event(envelope):
       result["ip"] = extract_ip(msg)
 
   if result["event_type"] is None:
-    return None
+    result["event_type"] = "OTHER"
 
   return result
 
 # Auxiliary extract functions
 def extract_user_for(msg):
-    match = re.search(r'for ([a-zA-Z0-9._-]+)', msg)
-    return match.group(1) if match else None
-
-def extract_user_accepted(msg):
-    match = re.search(r'Accepted .* for ([a-zA-Z0-9._-]+)', msg)
-    return match.group(1) if match else None
+  match = re.search(r'for ([a-zA-Z0-9._-]+)', msg)
+  return match.group(1) if match else None
 
 def extract_user_invalid(msg):
-    match = re.search(r'Invalid user ([a-zA-Z0-9._-]+)', msg)
-    return match.group(1) if match else None
+  match = re.search(r'invalid user ([a-zA-Z0-9._-]+)', msg, re.IGNORECASE)
+  return match.group(1) if match else None
 
 def extract_ip(msg):
-    match = re.search(r'from ([0-9a-fA-F:.]+)', msg)
-    return match.group(1) if match else None
+  match = re.search(r'from ([0-9a-fA-F:.]+)', msg)
+  return match.group(1) if match else None
