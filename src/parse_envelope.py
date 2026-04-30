@@ -6,7 +6,7 @@ def parse_line(line: str) -> dict:
   # Splits log
   parts = line.split(" ", 4)
 
-  timestamp = " ".join(parts[0:3])
+  timestamp = "2024 " + " ".join(parts[0:3]) #Adds a year for the db insertion
   host = parts[3]
 
   # Separates process and message
