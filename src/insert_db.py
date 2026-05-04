@@ -34,4 +34,5 @@ def insert_event(event: dict):
   """)
 
   with engine.begin() as conn:
-      conn.execute(query, event)
+    result = conn.execute(query, event)
+    return result.rowcount > 0
