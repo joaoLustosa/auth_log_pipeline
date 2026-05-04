@@ -2,7 +2,15 @@
 
 ## Overview
 
-This project implements a structured pipeline for parsing, normalizing, storing, and analyzing Linux authentication logs (`auth.log`). The objective is to transform unstructured system logs into structured data and extract security-relevant signals such as brute-force attempts, while explicitly handling imperfect data.
+This project implements a structured pipeline for parsing, normalizing, storing, and analyzing Linux authentication logs (`auth.log`).
+
+The objective is to transform unstructured system logs into structured data and extract security-relevant signals while preserving real-world imperfections. The system emphasizes:
+
+- ingestion reliability
+- data consistency
+- observability
+- statistical reasoning under imperfect data
+- explicit modeling limitations
 
 ---
 
@@ -12,41 +20,39 @@ This project uses sample authentication logs provided by Elastic:
 
 https://github.com/elastic/examples/blob/master/Machine%20Learning/Security%20Analytics%20Recipes/suspicious_login_activity/data/auth.log
 
-The dataset has been included locally in the `data/` directory for reproducibility.
+The dataset is included locally under `data/auth.log`.
 
-### Important Note on Timestamps
+### Timestamp Limitation
 
-The original dataset does not include year information.
-
-During parsing, the year `2026` is artificially added to enable insertion into PostgreSQL.
+The dataset does not include year information. During parsing, the year `2026` is injected.
 
 Implications:
 
-- Absolute timestamps are synthetic
-- Relative ordering is preserved
-- Long-term temporal analysis is unreliable
-- Only short time-window analysis is meaningful
+- absolute time is synthetic
+- relative ordering is preserved
+- only short time-window analysis is meaningful
 
 ---
 
 ## Architecture
 
-The pipeline follows a staged design:
+Pipeline stages:
 
-read → parse → normalize → store → (next: signal → detect)
+read → parse → normalize → store → signal → (next: detect)
 
 ---
 
-## Current Implementation (V2)
+## Current Implementation
 
-* Raw log ingestion from file
-* Envelope parsing (timestamp, host, process, message)
-* Event classification (authentication success/failure)
-* Field extraction (user, IP, failure mode)
-* Storage in PostgreSQL
-* Idempotent ingestion (duplicate-safe)
-* Ingestion observability (pipeline metrics)
-* Basic analytical queries
+- Raw ingestion from file
+- Envelope parsing (timestamp, host, process, message)
+- Event classification (authentication success/failure)
+- Field extraction (user, IP, failure mode)
+- PostgreSQL storage
+- Idempotent ingestion (duplicate-safe)
+- Ingestion observability (pipeline metrics)
+- Time-window signal construction
+- Statistical baseline and anomaly scoring (z-score)
 
 ---
 
@@ -54,189 +60,229 @@ read → parse → normalize → store → (next: signal → detect)
 
 ### Idempotency
 
-The pipeline enforces deterministic ingestion:
+- Unique constraint on `(timestamp, host, process, raw_message)`
+- Duplicate entries ignored via `ON CONFLICT DO NOTHING`
 
-- Unique constraint on:
-  - (timestamp, host, process, raw_message)
-- Duplicate entries are ignored via:
-  - ON CONFLICT DO NOTHING
+Guarantees:
 
-This guarantees:
+- deterministic ingestion
+- stable aggregations
 
-- Repeated pipeline runs do not change results
-- Aggregation queries remain stable
+Trade-off:
 
-### Trade-off
-
-If identical log entries occur legitimately, they are collapsed into one record, potentially reducing observed intensity of repeated events.
+- repeated identical events are collapsed, reducing observed intensity
 
 ---
 
 ## Observability
 
-Each pipeline run outputs:
+Each run outputs:
+
 
 Total lines: X
 Parsed events: Y
 Inserted events: Z
 
-This enables detection of:
 
-- Parsing loss → parsed < total
-- Deduplication impact → inserted < parsed
-- Ingestion stability across runs
+Enables:
 
----
-
-## Project Structure
-
-```
-.
-├── data/
-│   └── auth.log
-├── src/
-│   ├── db.py
-│   ├── parse_envelope.py
-│   ├── read_raw.py
-│   ├── run.py
-│   └── insert_db.py
-├── README.md
-├── requirements.txt
-└── LICENSE
-```
-
----
-
+- detection of parsing loss
+- measurement of deduplication impact
+- ingestion consistency validation
 
 ---
 
 ## Data Model
 
-Logs are stored in PostgreSQL with the following schema:
-
-* timestamp (TIMESTAMP)
-* host (TEXT)
-* process (TEXT)
-* event_type (TEXT)
-* auth_outcome (TEXT)
-* user_validity (TEXT)
-* failure_mode (TEXT)
-* user_name (TEXT)
-* ip (INET)
-* command (TEXT)
-* raw_message (TEXT)
+- timestamp (TIMESTAMP)
+- host (TEXT)
+- process (TEXT)
+- event_type (TEXT)
+- auth_outcome (TEXT)
+- user_validity (TEXT)
+- failure_mode (TEXT)
+- user_name (TEXT)
+- ip (INET)
+- command (TEXT)
+- raw_message (TEXT)
 
 ---
 
-## Event Classification
+## Signal Construction
 
-The pipeline currently identifies:
+### Definition
 
-* AUTH SUCCESS
-  * Example: accepted public key login
+Unit of analysis:
 
-* AUTH FAILURE
-  * Invalid user attempts
-  * Maximum authentication attempts exceeded
-  * Pre-auth invalid user probes
+- Entity: IP
+- Time window: 5 minutes
+- Metrics:
+  - failures
+  - successes
+  - users targeted
 
-* OTHER
-  * Non-authentication logs (preserved but not classified)
+Each row represents:
+
+> behavior of one IP within a 5-minute interval
+
+### Constraints
+
+- Only events with IP are included
+- ~89% of logs are excluded (no IP)
+- Idle windows are not represented
 
 ---
 
-## Observed Data Characteristics (Measured)
+## Statistical Modeling
 
-### Missing IP Addresses (Dominant)
+### Baseline
 
-- Approximately 5963 out of 6697 stored events (~89%) have NULL IP
+Computed over all IP-window observations:
+
+- Mean failures ≈ 3.86
+- Standard deviation ≈ 6.45
+
+Observation:
+
+- stddev > mean → highly skewed distribution
+
+---
+
+### Anomaly Score
+
+Z-score is used:
+
+z = (failures − mean) / stddev
 
 Interpretation:
 
-- Majority of events occur in pre-authentication phase
-- Many events cannot be attributed to a source IP
-- IP-based analysis operates on a limited subset of data
+- high z-score → deviation from typical activity
+- near zero → typical behavior
 
 ---
 
-### Duplicate Log Entries
+## Observed Behavior
 
-- 424 duplicate entries detected during ingestion
-- Removed by uniqueness constraint
+### Strong Signals (Detected Well)
 
-Implication:
-
-- Source dataset contains duplicated logs
-- Deduplication alters observed frequency of repeated events
-
----
-
-### Behavioral Patterns per IP
-
-#### Pure failure IPs
-- High number of failures
-- No successful logins
-- Likely automated brute-force attempts
-
-#### Mixed behavior IPs
-- Combination of failures and successes
-- Example: low failures, high successes
+- High-intensity bursts:
+  - 30–46 failures within 5 minutes
+  - z-scores > 4
 
 Interpretation:
 
-- May represent legitimate users
-- Or compromised accounts
-- Breaks naive detection assumptions
+- clear brute-force attacks
+- strong separation from baseline
 
 ---
 
-### Pre-authentication Activity
+### Moderate Activity (Ambiguous)
 
-- Significant number of failures without IP
-- Typically associated with invalid user probing
+- 15–20 failures per window
+- z ≈ 1.8–2.5
 
-Implication:
+Interpretation:
 
-- Some attack activity is not attributable
-- Detection models based solely on IP will miss this behavior
-
----
-
-## Key Observations (from data)
-
-* High concentration of failed login attempts from specific IPs
-* Large number of invalid user probes (likely automated scanning)
-* Many events without IP (pre-auth stage behavior)
-* Very low success rate for external IPs
+- could be smaller attacks
+- classification depends on threshold
 
 ---
 
-## Setup
+### Weak Signals (Missed)
 
-### 1. Environment
+- 5–10 failures per window
+- z < 1
 
-```
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
+Interpretation:
 
-### 2. PostgreSQL (Docker)
+- treated as normal behavior
+- may include slow brute-force attempts
 
-```
-docker run --name auth-log-db \
-  -e POSTGRES_USER=postgres \
-  -e POSTGRES_PASSWORD=postgres \
-  -e POSTGRES_DB=auth_logs \
-  -p 127.0.0.1:5432:5432 \
-  -d postgres:15
-```
+---
 
-### 3. Run pipeline
+## Model Limitations
 
-```
-python -m src.run
-```
+### 1. High Variance
+
+- extreme bursts inflate stddev
+- reduces sensitivity to moderate anomalies
+
+---
+
+### 2. Global Baseline
+
+- one mean/stddev for all IPs
+- ignores per-IP behavior differences
+
+Effect:
+
+- attackers influence baseline
+- moderate attacks appear normal
+
+---
+
+### 3. Active-Only Windows
+
+- only windows with activity are modeled
+- no representation of idle periods
+
+Effect:
+
+- no contrast between activity and silence
+
+---
+
+### 4. Data Exclusion
+
+- ~89% of events lack IP
+- pre-auth activity is ignored
+
+Effect:
+
+- blind to certain attack types
+
+---
+
+## Threshold Sensitivity
+
+Example:
+
+- z > 2 → detects only large bursts
+- z > 1 → detects more activity but increases noise
+
+Conclusion:
+
+- thresholds are not inherently meaningful
+- must be justified by observed behavior
+
+---
+
+## Evasion Implications (Preliminary)
+
+The current model can be bypassed by:
+
+### Low-and-slow attack
+- spreading attempts across time
+- staying within statistical baseline
+
+### Distributed attack
+- splitting attempts across multiple IPs
+- avoiding per-IP thresholds
+
+### Mixed behavior
+- combining successful and failed logins
+- mimicking legitimate activity
+
+---
+
+## Known Data Imperfections
+
+- Missing IP addresses (~89%)
+- Duplicate log entries (removed during ingestion)
+- Mixed benign and suspicious behavior
+- Synthetic timestamps
+
+These are preserved intentionally.
 
 ---
 
@@ -261,23 +307,13 @@ ORDER BY failures DESC;
 
 ---
 
-## Known Limitations
-
-- IP-based analysis excludes ~89% of events
-- Synthetic timestamps limit temporal validity
-- Deduplication may suppress repeated identical attacks
-- Pre-auth events cannot be attributed to a source
-
-These limitations are preserved intentionally to reflect real-world imperfect data.
-
----
-
 ## Next Steps
 
-* Construct time-window aggregation signals
-* Build per-IP behavioral summaries
-* Prepare data for detection logic
-* Evaluate detection under imperfect conditions
+- Implement rule-based detection (N failures in T window)
+- Compare rule-based vs statistical detection
+- Evaluate false positives and false negatives
+- Perform explicit evasion analysis
+- Introduce failure injection
 
 ---
 
