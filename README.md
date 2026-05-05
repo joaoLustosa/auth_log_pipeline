@@ -11,7 +11,7 @@ The objective is to build a system that:
 - detects anomalous authentication patterns
 - explicitly models failure, evasion, and data imperfections
 
-This is not a “working script”, but a system designed to be **defensible under scrutiny**, including demonstrating where and why it fails.
+This is not a “working script”, but a system designed to be **defensible under scrutiny**.
 
 ---
 
@@ -21,7 +21,7 @@ Elastic sample authentication logs:
 
 https://github.com/elastic/examples/blob/master/Machine%20Learning/Security%20Analytics%20Recipes/suspicious_login_activity/data/auth.log
 
-### Important Limitation
+### Important Limation
 
 - Logs do not contain year
 - Year `2026` is injected during parsing
@@ -38,7 +38,7 @@ Implications:
 
 Pipeline stages:
 
-read → parse → normalize → store → signal → detect → evaluate → evade → degrade
+read → parse → normalize → store → signal → detect → evaluate → stress-test
 
 ---
 
@@ -95,7 +95,7 @@ These are not cleaned.
 ### Unit of Analysis
 
 - Entity: IP
-- Window: 5 minutes
+- Window: 5 minutes (fixed, aligned to clock boundaries)
 
 ### Metrics
 
@@ -110,15 +110,15 @@ Each row represents:
 ### Constraints
 
 - Only IP-based logs included
-- Majority of data excluded (~89%)
+- Majority of data excluded
 - No idle windows represented
-- No temporal continuity modeled
+- Strong dependence on time window alignment
 
 ---
 
 ## Statistical Model
 
-### Baseline
+### Baseline (Original Data)
 
 - Mean failures ≈ 3.86
 - Stddev ≈ 6.47
@@ -126,7 +126,7 @@ Each row represents:
 Observation:
 
 - stddev > mean → highly skewed distribution
-- variance dominated by burst activity
+- bursts dominate variance
 
 ---
 
@@ -134,44 +134,87 @@ Observation:
 
 z = (failures − mean) / stddev
 
-In practice:
+---
 
+## Observed Behavior
 
-z > 2 ≈ failures ≥ ~20
+### Strong Attacks (Detected Reliably)
 
+- 20–46 failures per window
+- z-score > 2–6
 
-This collapses z-score into an **extreme-event detector**, not a general anomaly model.
+Interpretation:
+- clear brute-force bursts
+- robust to moderate noise
 
 ---
 
-## Detection Models
+### Moderate Activity (Unstable)
 
-### Rule-Based
+- 8–15 failures
+- z ≈ 0.6–1.5
 
-
-failures ≥ N per 5-minute window
-
-
-Thresholds tested:
-
-- N ≥ 5
-- N ≥ 10
-- N ≥ 20
+Interpretation:
+- highly sensitive to thresholds
+- sensitive to data loss and time shifts
 
 ---
 
-### Statistical (Z-score)
+### Weak Activity (Missed)
+
+- < 8 failures
+- z < 1
+
+Interpretation:
+- treated as normal
+- indistinguishable from background noise
+
+---
+
+## Rule-Based Detection
+
+### Definition
 
 
-z > 2
+failures ≥ N within 5-minute window
 
+
+### Threshold Behavior
+
+- N ≥ 20 → high precision, low recall
+- N ≥ 10 → moderate balance
+- N ≥ 5 → high recall, high false positives
+
+---
+
+## Model Comparison
+
+### Z-score
+
+- adaptive
+- sensitive to variance
+- misses moderate attacks
+
+### Rule-based
+
+- interpretable
+- consistent
+- threshold-dependent
 
 ---
 
 ## Evaluation Results
 
-Total windows: 181
-Ground truth: single high-intensity attack window (46 failures)
+### Ground Truth
+
+Attack window:
+
+- IP: `34.204.227.175`
+- Peak: 46 failures in one window
+
+---
+
+### Baseline Detection
 
 | Method   | TP | FP | FN |
 |----------|----|----|----|
@@ -182,197 +225,187 @@ Ground truth: single high-intensity attack window (46 failures)
 
 ---
 
-## Key Findings
+## Failure Injection Experiments
 
-### 1. All models detect extreme bursts
+### Experiment A — Log Loss (30%)
 
-- 40–46 failures
-- trivial detection case
-- not a meaningful benchmark
+#### Effect on Attack
 
----
+- 46 → 33
+- 40 → 25
 
-### 2. No stable threshold exists
+#### Detection
 
-- N ≥ 5 → high recall, unusable FP (~27%)
-- N ≥ 10 → moderate balance
-- N ≥ 20 / z > 2 → high precision, low recall
+| Method   | TP | FP | FN |
+|----------|----|----|----|
+| N ≥ 5    | 1  | 37 | 0  |
+| N ≥ 10   | 1  | 7  | 0  |
+| N ≥ 20   | 1  | 4  | 0  |
+| z > 2    | 1  | 5  | 0  |
 
-This is not tuning failure. It is **feature insufficiency**.
+#### Findings
 
----
-
-### 3. Critical failure region identified
-
-
-failures: 8–15
-z_score: < 2
-
-
-Properties:
-
-- frequent in dataset
-- invisible to z-score
-- inconsistently detected by rules
-- indistinguishable from benign activity
+- extreme attacks remain detectable
+- moderate signals degrade significantly
+- threshold crossings decrease non-linearly
 
 ---
 
-### 4. Z-score is structurally ineffective
+### Experiment B — Delayed Ingestion
 
-Due to high variance:
+#### Case 1 — +2 Minutes
 
-- moderate attacks collapse into “normal”
-- model behaves like a fixed high threshold
+- 46 + 40 → 86 (merged into single window)
 
----
+#### Case 2 — +1 Minute
 
-### 5. System is memoryless
+- 46 + 40 → 73 + 13 (skewed redistribution)
 
-Detection operates on:
+#### Detection (both cases)
 
-> one IP, one window, isolated
-
-It does not model:
-
-- temporal continuity
-- repeated behavior
-- cumulative activity
+| Method   | TP | FP | FN |
+|----------|----|----|----|
+| N ≥ 5    | 1  | ~49 | 0 |
+| N ≥ 10   | 1  | ~6–7 | 0 |
+| N ≥ 20   | 1  | ~4–5 | 0 |
+| z > 2    | 1  | ~4–5 | 0 |
 
 ---
 
-### 6. Dataset bias is structural
+## Critical Findings
 
-- ~89% of failures excluded (no IP)
-- detection operates on partial observability
-- blind spots are systemic, not incidental
+### 1. Time Windowing Is Not Stable
 
----
+Small timestamp shifts produce:
 
-## Evasion Analysis (Empirical)
+- burst merging
+- burst splitting
+- asymmetric redistribution
 
-### 1. Low-and-Slow (Single IP)
-
-Observed:
-
-- 16 failures across 3 windows
-- never exceeds threshold
-
-Effect:
-
-- bypasses N ≥ 10, N ≥ 20, z-score
-- only detectable in high-FP regime
+Detection depends on alignment, not behavior.
 
 ---
 
-### 2. Moderate Burst Masking
+### 2. Detection Is Not Time-Invariant
 
-Observed:
 
-- 8–9 failures per window
-- z < 1
+f(events) ≠ f(events + Δt)
 
-Effect:
 
-- invisible to statistical model
-- below practical rule thresholds
+Small temporal shifts significantly change signal representation.
 
 ---
 
-### 3. Distributed Attack
+### 3. Aggregation Artifacts Distort Reality
 
-Observed:
-
-- windows with 20–33 total failures
-- no single IP dominant
-
-Effect:
-
-- no per-IP detection triggered
-- system misses high-volume attack
+- moderate bursts can appear as extreme attacks (merge)
+- strong bursts can weaken (split or loss)
+- system may overestimate or underestimate severity
 
 ---
 
-### 4. Temporal Smearing
+### 4. Moderate Attacks Are Fragile
 
-Observed pattern:
+Combination of:
 
-- repeated sub-threshold activity across windows
+- time misalignment
+- log loss
 
-Effect:
+causes:
 
-- no accumulation
-- no detection
-
----
-
-### 5. Pre-auth Blind Spot
-
-Measured:
-
-- 178 failures with NULL IP
-
-Effect:
-
-- completely excluded from detection
-- attacker can operate fully undetected
+- 10–15 failures → 5–9 failures
+- drop below thresholds
+- become undetectable
 
 ---
 
-## Cross-Model Failure Matrix
+### 5. System Detects Alignment, Not Behavior
 
-| Attack Type           | N ≥ 5 | N ≥ 10 | N ≥ 20 | z > 2 |
-|----------------------|------|--------|--------|-------|
-| High burst           | ✓    | ✓      | ✓      | ✓     |
-| Moderate burst       | ✓    | ✗      | ✗      | ✗     |
-| Low-and-slow         | ✓    | ✗      | ✗      | ✗     |
-| Distributed          | ✗    | ✗      | ✗      | ✗     |
-| Temporal smear       | ✗    | ✗      | ✗      | ✗     |
-| Pre-auth             | ✗    | ✗      | ✗      | ✗     |
+The system is effectively detecting:
 
----
+> coincidence between attack bursts and fixed window boundaries
 
-## Structural Limitations
+Not:
 
-The system fails due to:
-
-- IP-only modeling (no cross-entity reasoning)
-- lack of temporal state
-- variance-sensitive statistics
-- partial observability (missing IPs)
-
-These are design constraints, not implementation errors.
+> intrinsic attacker behavior
 
 ---
 
-## Failure Injection (Next Step)
+## Evasion Path (Demonstrated)
 
-The system will be stress-tested under:
+An attacker can evade detection by:
 
-### Log Loss
-- simulate 20–30% data removal
-- evaluate degradation in detection
+- operating in moderate intensity (8–15 failures)
+- spreading activity near window boundaries
+- relying on natural log loss / ingestion noise
 
-### Delayed Ingestion
-- shift timestamps across windows
-- observe fragmentation of bursts
+Result:
 
-Goal:
-
-> quantify how quickly detection collapses under realistic system failure
+- signal fragmentation
+- threshold bypass
+- statistical invisibility
 
 ---
 
-## Project Philosophy
+## Failure Modes (Updated)
 
-This project does not aim to:
+### Statistical Model
 
-- maximize detection rates
-- optimize metrics in isolation
+- fails under high variance
+- insensitive to moderate deviations
+- unstable under distribution shifts
 
-It aims to:
+### Rule-Based Model
 
-> build a system whose behavior — including its failures — is measurable, explainable, and defensible.
+- fails below threshold
+- highly sensitive to aggregation artifacts
+- non-linear degradation under noise
+
+### System-Level
+
+- time alignment dependency
+- no continuity modeling across windows
+- ignores 89% of data (NULL IP events)
+
+---
+
+## Known Blind Spots
+
+- pre-auth attacks (no IP)
+- distributed attacks across IPs
+- low-and-slow attacks
+- time-distributed attacks
+- cross-window behavioral continuity
+
+---
+
+## Final Conclusion
+
+The system:
+
+### Works for:
+- high-intensity brute-force bursts
+- clean, aligned data conditions
+
+### Fails for:
+- realistic attacker behavior
+- noisy or incomplete data
+- temporal misalignment
+
+### Core Limitation:
+
+> Fixed-window aggregation creates unstable and misleading representations of behavior.
+
+---
+
+## Next Step
+
+Redesign detection around:
+
+- time-robust signals
+- continuity across windows
+- reduced dependence on arbitrary thresholds
+- resilience to missing data
 
 ---
 
