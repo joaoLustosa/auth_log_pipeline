@@ -4,33 +4,33 @@
 
 This project implements a structured pipeline for parsing, normalizing, storing, and analyzing Linux authentication logs (`auth.log`).
 
-The objective is to transform unstructured system logs into structured data and extract security-relevant signals while preserving real-world imperfections. The system emphasizes:
+The objective is to build a system that:
 
-- ingestion reliability
-- data consistency
-- observability
-- statistical reasoning under imperfect data
-- explicit modeling limitations
+- ingests and structures noisy log data
+- constructs behavioral signals
+- detects anomalous authentication patterns
+- explicitly models failure, evasion, and data imperfections
+
+This is not a “working script”, but a system designed to be **defensible under scrutiny**.
 
 ---
 
 ## Data Source
 
-This project uses sample authentication logs provided by Elastic:
+Elastic sample authentication logs:
 
 https://github.com/elastic/examples/blob/master/Machine%20Learning/Security%20Analytics%20Recipes/suspicious_login_activity/data/auth.log
 
-The dataset is included locally under `data/auth.log`.
+### Important Limitation
 
-### Timestamp Limitation
-
-The dataset does not include year information. During parsing, the year `2026` is injected.
+- Logs do not contain year
+- Year `2026` is injected during parsing
 
 Implications:
 
-- absolute time is synthetic
+- absolute time is artificial
 - relative ordering is preserved
-- only short time-window analysis is meaningful
+- only short-window analysis is valid
 
 ---
 
@@ -38,57 +38,27 @@ Implications:
 
 Pipeline stages:
 
-read → parse → normalize → store → signal → (next: detect)
+read → parse → normalize → store → signal → detect → evaluate
 
 ---
 
 ## Current Implementation
 
-- Raw ingestion from file
-- Envelope parsing (timestamp, host, process, message)
-- Event classification (authentication success/failure)
-- Field extraction (user, IP, failure mode)
+### Ingestion Layer
+- raw log reading
+- parsing into structured envelope
+- event classification (AUTH SUCCESS / FAILURE / OTHER)
+- field extraction (user, IP, failure mode)
+
+### Storage Layer
 - PostgreSQL storage
-- Idempotent ingestion (duplicate-safe)
-- Ingestion observability (pipeline metrics)
-- Time-window signal construction
-- Statistical baseline and anomaly scoring (z-score)
+- idempotent ingestion via unique constraint
+- duplicate suppression (`ON CONFLICT DO NOTHING`)
 
----
-
-## Ingestion Reliability
-
-### Idempotency
-
-- Unique constraint on `(timestamp, host, process, raw_message)`
-- Duplicate entries ignored via `ON CONFLICT DO NOTHING`
-
-Guarantees:
-
-- deterministic ingestion
-- stable aggregations
-
-Trade-off:
-
-- repeated identical events are collapsed, reducing observed intensity
-
----
-
-## Observability
-
-Each run outputs:
-
-
-Total lines: X
-Parsed events: Y
-Inserted events: Z
-
-
-Enables:
-
-- detection of parsing loss
-- measurement of deduplication impact
-- ingestion consistency validation
+### Observability
+- total lines processed
+- parsed events
+- inserted events
 
 ---
 
@@ -108,39 +78,47 @@ Enables:
 
 ---
 
-## Signal Construction
+## Data Imperfections
 
-### Definition
+- ~89% of events have NULL IP
+- duplicate logs (removed during ingestion)
+- mixed benign and malicious behavior
+- missing fields (user/IP)
+- synthetic timestamps
 
-Unit of analysis:
-
-- Entity: IP
-- Time window: 5 minutes
-- Metrics:
-  - failures
-  - successes
-  - users targeted
-
-Each row represents:
-
-> behavior of one IP within a 5-minute interval
-
-### Constraints
-
-- Only events with IP are included
-- ~89% of logs are excluded (no IP)
-- Idle windows are not represented
+These are not cleaned.
 
 ---
 
-## Statistical Modeling
+## Signal Construction
+
+### Unit of Analysis
+
+- Entity: IP
+- Window: 5 minutes
+- Metrics:
+  - failures
+  - successes
+  - users_targeted
+
+Each row represents:
+
+> behavior of one IP in one 5-minute window
+
+### Constraints
+
+- Only IP-based logs included
+- Majority of data excluded
+- No idle windows represented
+
+---
+
+## Statistical Model
 
 ### Baseline
 
-Computed over all IP-window observations:
-
 - Mean failures ≈ 3.86
-- Standard deviation ≈ 6.45
+- Stddev ≈ 6.45
 
 Observation:
 
@@ -150,170 +128,145 @@ Observation:
 
 ### Anomaly Score
 
-Z-score is used:
-
 z = (failures − mean) / stddev
 
 Interpretation:
 
-- high z-score → deviation from typical activity
-- near zero → typical behavior
+- high z → deviation from dataset norm
+- low z → typical activity
 
 ---
 
 ## Observed Behavior
 
-### Strong Signals (Detected Well)
+### Strong Attacks (Detected Well)
 
-- High-intensity bursts:
-  - 30–46 failures within 5 minutes
-  - z-scores > 4
+- 20–46 failures per window
+- z-score > 2–6
 
 Interpretation:
-
-- clear brute-force attacks
-- strong separation from baseline
+- clear brute-force bursts
 
 ---
 
 ### Moderate Activity (Ambiguous)
 
-- 15–20 failures per window
-- z ≈ 1.8–2.5
+- 10–20 failures
+- z ≈ 1–2
 
 Interpretation:
-
-- could be smaller attacks
-- classification depends on threshold
+- uncertain classification
+- threshold-dependent
 
 ---
 
-### Weak Signals (Missed)
+### Weak Activity (Missed)
 
-- 5–10 failures per window
+- 5–10 failures
 - z < 1
 
 Interpretation:
-
-- treated as normal behavior
-- may include slow brute-force attempts
-
----
-
-## Model Limitations
-
-### 1. High Variance
-
-- extreme bursts inflate stddev
-- reduces sensitivity to moderate anomalies
+- treated as normal
+- may include low-and-slow attacks
 
 ---
 
-### 2. Global Baseline
+## Rule-Based Detection
 
-- one mean/stddev for all IPs
-- ignores per-IP behavior differences
+### Definition
 
-Effect:
 
-- attackers influence baseline
-- moderate attacks appear normal
+failures ≥ N within 5-minute window
 
----
 
-### 3. Active-Only Windows
+### Threshold Behavior
 
-- only windows with activity are modeled
-- no representation of idle periods
-
-Effect:
-
-- no contrast between activity and silence
+- N ≥ 20 → high precision, low recall
+- N ≥ 10 → moderate balance
+- N ≥ 5 → high recall, low precision
 
 ---
 
-### 4. Data Exclusion
+## Model Comparison
 
-- ~89% of events lack IP
-- pre-auth activity is ignored
+### Z-score
 
-Effect:
+- adaptive
+- influenced by variance
+- misses moderate attacks
 
-- blind to certain attack types
+### Rule-based
 
----
-
-## Threshold Sensitivity
-
-Example:
-
-- z > 2 → detects only large bursts
-- z > 1 → detects more activity but increases noise
-
-Conclusion:
-
-- thresholds are not inherently meaningful
-- must be justified by observed behavior
+- interpretable
+- consistent
+- threshold-sensitive
 
 ---
 
-## Evasion Implications (Preliminary)
+## Key Trade-off
 
-The current model can be bypassed by:
+- statistical → adaptive but unstable under skew
+- rule-based → stable but arbitrary
+
+---
+
+## Evasion Analysis
 
 ### Low-and-slow attack
-- spreading attempts across time
-- staying within statistical baseline
+- keep attempts below threshold
 
 ### Distributed attack
-- splitting attempts across multiple IPs
-- avoiding per-IP thresholds
+- spread attempts across IPs
 
 ### Mixed behavior
-- combining successful and failed logins
-- mimicking legitimate activity
+- combine success + failure
+
+### Time spreading
+- avoid spikes
 
 ---
 
-## Known Data Imperfections
+## Failure Modes
 
-- Missing IP addresses (~89%)
-- Duplicate log entries (removed during ingestion)
-- Mixed benign and suspicious behavior
-- Synthetic timestamps
+### Statistical model fails when:
+- variance is high
+- attackers inflate baseline
 
-These are preserved intentionally.
+### Rule-based fails when:
+- attacker operates below threshold
+
+### Both fail when:
+- attack is distributed or slow
 
 ---
 
-## Example Queries
+## Known Blind Spots
 
-Top IPs by failed authentication:
+- pre-auth attacks (no IP)
+- idle behavior (not modeled)
+- user-level targeting incomplete
 
-SELECT ip, COUNT()
-FROM logs
-WHERE auth_outcome = 'FAILURE'
-GROUP BY ip
-ORDER BY COUNT() DESC;
+---
 
-Failures vs successes per IP:
+## Evaluation (Next Step)
 
-SELECT ip,
-COUNT() FILTER (WHERE auth_outcome = 'FAILURE') AS failures,
-COUNT() FILTER (WHERE auth_outcome = 'SUCCESS') AS successes
-FROM logs
-GROUP BY ip
-ORDER BY failures DESC;
+Will include:
+
+- manually defined attack window
+- normal window
+- comparison of:
+  - true positives
+  - false positives
+  - threshold sensitivity
 
 ---
 
 ## Next Steps
 
-- Implement rule-based detection (N failures in T window)
-- Compare rule-based vs statistical detection
-- Evaluate false positives and false negatives
-- Perform explicit evasion analysis
-- Introduce failure injection
+- Ground truth labeling
+- Detection evaluation
+- Formal evasion analysis
+- Failure injection (pipeline degradation)
 
 ---
 
