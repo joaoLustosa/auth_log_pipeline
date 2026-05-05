@@ -11,7 +11,7 @@ The objective is to build a system that:
 - detects anomalous authentication patterns
 - explicitly models failure, evasion, and data imperfections
 
-This is not a “working script”, but a system designed to be **defensible under scrutiny**.
+This is not a “working script”, but a system designed to be **defensible under scrutiny**, including demonstrating where and why it fails.
 
 ---
 
@@ -38,7 +38,7 @@ Implications:
 
 Pipeline stages:
 
-read → parse → normalize → store → signal → detect → evaluate
+read → parse → normalize → store → signal → detect → evaluate → evade → degrade
 
 ---
 
@@ -96,10 +96,12 @@ These are not cleaned.
 
 - Entity: IP
 - Window: 5 minutes
-- Metrics:
-  - failures
-  - successes
-  - users_targeted
+
+### Metrics
+
+- failures
+- successes
+- users_targeted
 
 Each row represents:
 
@@ -108,8 +110,9 @@ Each row represents:
 ### Constraints
 
 - Only IP-based logs included
-- Majority of data excluded
+- Majority of data excluded (~89%)
 - No idle windows represented
+- No temporal continuity modeled
 
 ---
 
@@ -118,11 +121,12 @@ Each row represents:
 ### Baseline
 
 - Mean failures ≈ 3.86
-- Stddev ≈ 6.45
+- Stddev ≈ 6.47
 
 Observation:
 
 - stddev > mean → highly skewed distribution
+- variance dominated by burst activity
 
 ---
 
@@ -130,143 +134,245 @@ Observation:
 
 z = (failures − mean) / stddev
 
-Interpretation:
+In practice:
 
-- high z → deviation from dataset norm
-- low z → typical activity
 
----
+z > 2 ≈ failures ≥ ~20
 
-## Observed Behavior
 
-### Strong Attacks (Detected Well)
-
-- 20–46 failures per window
-- z-score > 2–6
-
-Interpretation:
-- clear brute-force bursts
+This collapses z-score into an **extreme-event detector**, not a general anomaly model.
 
 ---
 
-### Moderate Activity (Ambiguous)
+## Detection Models
 
-- 10–20 failures
-- z ≈ 1–2
+### Rule-Based
 
-Interpretation:
-- uncertain classification
-- threshold-dependent
+
+failures ≥ N per 5-minute window
+
+
+Thresholds tested:
+
+- N ≥ 5
+- N ≥ 10
+- N ≥ 20
 
 ---
 
-### Weak Activity (Missed)
+### Statistical (Z-score)
 
-- 5–10 failures
+
+z > 2
+
+
+---
+
+## Evaluation Results
+
+Total windows: 181
+Ground truth: single high-intensity attack window (46 failures)
+
+| Method   | TP | FP | FN |
+|----------|----|----|----|
+| N ≥ 5    | 1  | 49 | 0  |
+| N ≥ 10   | 1  | 7  | 0  |
+| N ≥ 20   | 1  | 6  | 0  |
+| z > 2    | 1  | 6  | 0  |
+
+---
+
+## Key Findings
+
+### 1. All models detect extreme bursts
+
+- 40–46 failures
+- trivial detection case
+- not a meaningful benchmark
+
+---
+
+### 2. No stable threshold exists
+
+- N ≥ 5 → high recall, unusable FP (~27%)
+- N ≥ 10 → moderate balance
+- N ≥ 20 / z > 2 → high precision, low recall
+
+This is not tuning failure. It is **feature insufficiency**.
+
+---
+
+### 3. Critical failure region identified
+
+
+failures: 8–15
+z_score: < 2
+
+
+Properties:
+
+- frequent in dataset
+- invisible to z-score
+- inconsistently detected by rules
+- indistinguishable from benign activity
+
+---
+
+### 4. Z-score is structurally ineffective
+
+Due to high variance:
+
+- moderate attacks collapse into “normal”
+- model behaves like a fixed high threshold
+
+---
+
+### 5. System is memoryless
+
+Detection operates on:
+
+> one IP, one window, isolated
+
+It does not model:
+
+- temporal continuity
+- repeated behavior
+- cumulative activity
+
+---
+
+### 6. Dataset bias is structural
+
+- ~89% of failures excluded (no IP)
+- detection operates on partial observability
+- blind spots are systemic, not incidental
+
+---
+
+## Evasion Analysis (Empirical)
+
+### 1. Low-and-Slow (Single IP)
+
+Observed:
+
+- 16 failures across 3 windows
+- never exceeds threshold
+
+Effect:
+
+- bypasses N ≥ 10, N ≥ 20, z-score
+- only detectable in high-FP regime
+
+---
+
+### 2. Moderate Burst Masking
+
+Observed:
+
+- 8–9 failures per window
 - z < 1
 
-Interpretation:
-- treated as normal
-- may include low-and-slow attacks
+Effect:
+
+- invisible to statistical model
+- below practical rule thresholds
 
 ---
 
-## Rule-Based Detection
+### 3. Distributed Attack
 
-### Definition
+Observed:
 
+- windows with 20–33 total failures
+- no single IP dominant
 
-failures ≥ N within 5-minute window
+Effect:
 
-
-### Threshold Behavior
-
-- N ≥ 20 → high precision, low recall
-- N ≥ 10 → moderate balance
-- N ≥ 5 → high recall, low precision
+- no per-IP detection triggered
+- system misses high-volume attack
 
 ---
 
-## Model Comparison
+### 4. Temporal Smearing
 
-### Z-score
+Observed pattern:
 
-- adaptive
-- influenced by variance
-- misses moderate attacks
+- repeated sub-threshold activity across windows
 
-### Rule-based
+Effect:
 
-- interpretable
-- consistent
-- threshold-sensitive
+- no accumulation
+- no detection
 
 ---
 
-## Key Trade-off
+### 5. Pre-auth Blind Spot
 
-- statistical → adaptive but unstable under skew
-- rule-based → stable but arbitrary
+Measured:
 
----
+- 178 failures with NULL IP
 
-## Evasion Analysis
+Effect:
 
-### Low-and-slow attack
-- keep attempts below threshold
-
-### Distributed attack
-- spread attempts across IPs
-
-### Mixed behavior
-- combine success + failure
-
-### Time spreading
-- avoid spikes
+- completely excluded from detection
+- attacker can operate fully undetected
 
 ---
 
-## Failure Modes
+## Cross-Model Failure Matrix
 
-### Statistical model fails when:
-- variance is high
-- attackers inflate baseline
-
-### Rule-based fails when:
-- attacker operates below threshold
-
-### Both fail when:
-- attack is distributed or slow
-
----
-
-## Known Blind Spots
-
-- pre-auth attacks (no IP)
-- idle behavior (not modeled)
-- user-level targeting incomplete
+| Attack Type           | N ≥ 5 | N ≥ 10 | N ≥ 20 | z > 2 |
+|----------------------|------|--------|--------|-------|
+| High burst           | ✓    | ✓      | ✓      | ✓     |
+| Moderate burst       | ✓    | ✗      | ✗      | ✗     |
+| Low-and-slow         | ✓    | ✗      | ✗      | ✗     |
+| Distributed          | ✗    | ✗      | ✗      | ✗     |
+| Temporal smear       | ✗    | ✗      | ✗      | ✗     |
+| Pre-auth             | ✗    | ✗      | ✗      | ✗     |
 
 ---
 
-## Evaluation (Next Step)
+## Structural Limitations
 
-Will include:
+The system fails due to:
 
-- manually defined attack window
-- normal window
-- comparison of:
-  - true positives
-  - false positives
-  - threshold sensitivity
+- IP-only modeling (no cross-entity reasoning)
+- lack of temporal state
+- variance-sensitive statistics
+- partial observability (missing IPs)
+
+These are design constraints, not implementation errors.
 
 ---
 
-## Next Steps
+## Failure Injection (Next Step)
 
-- Ground truth labeling
-- Detection evaluation
-- Formal evasion analysis
-- Failure injection (pipeline degradation)
+The system will be stress-tested under:
+
+### Log Loss
+- simulate 20–30% data removal
+- evaluate degradation in detection
+
+### Delayed Ingestion
+- shift timestamps across windows
+- observe fragmentation of bursts
+
+Goal:
+
+> quantify how quickly detection collapses under realistic system failure
+
+---
+
+## Project Philosophy
+
+This project does not aim to:
+
+- maximize detection rates
+- optimize metrics in isolation
+
+It aims to:
+
+> build a system whose behavior — including its failures — is measurable, explainable, and defensible.
 
 ---
 
